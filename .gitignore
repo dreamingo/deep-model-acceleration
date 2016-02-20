@@ -1,0 +1,5 @@
+*.pyc
+*.pl
+*.log
+log/
+data/
