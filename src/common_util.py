@@ -30,8 +30,8 @@ def get_filters_params(net, net_param):
     """
     filter_params = {}
     blobs = net.blobs
-    for l in net_param.layers:
-        if l.type == 4:
+    for l in net_param.layer:
+        if l.type == "Convolution":
             conv_param = l.convolution_param
             l_param = ConvLayerParam()
             l_param.num_filters = conv_param.num_output

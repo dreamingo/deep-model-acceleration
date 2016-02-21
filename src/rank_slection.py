@@ -1,67 +1,40 @@
+# enconding=utf-8
 from __future__ import print_function
-import os
-import random
-import cPickle
-import numpy as np
 from sklearn.decomposition import PCA
-from caffe_io import transform_image, load_image, IOParam, load_net_and_param
+from caffe_io import load_image, load_net_and_param
 from common_util import get_filters_params, compute_conv_layer_complexity, timeit
+from extrac_conv_layer_response import ConvLayerResponseExtractor
 
 
 class RankSelection:
-    def __init__(self, net, net_param, io_param=IOParam()):
+    def __init__(self, net, net_param):
         """"""
         self._net = net
         self._net_param = net_param
         self._rank_list = []
-        self._io_param = io_param
         # The params {layer_name: common_util.ConvLayerParam} of the filters
         # in each conv layer
         self._filters_params = get_filters_params(net, net_param)
         # 4 is the enum value for the convolution layer type
-        conv_layer_params = [l for l in self._net_param.layers if l.type == 4]
+        conv_layer_params = [l for l in self._net_param.layer if l.type == 'Convolution']
         # We do not acclerate conv1_1
         self._conv_layer_params = conv_layer_params[1::]
+        # Layer complexity for each layer
         self._layer_complexity = {l.name: compute_conv_layer_complexity(l.name,
-                                                                        self._filters_params)
-                                  for l in self._conv_layer_params}
+            self._filters_params) for l in self._conv_layer_params}
+        # Total complexity of all conv layers
         self._total_complexity = sum(self._layer_complexity.itervalues())
 
-    def rank_selection(self, imgs, speedup_ratio, response_file):
-        """
-        Rank selction for the current net for given imgs and speedup-ratio
-        @Parameters:
-            imgs: list, list of ndarry, image datas;
-            speedup_ratio: float
-            response_file: The dump filename for the responses, if-exist, load
-                           the responses, else, dump it into file after calculation
-        @Returns:
-            None
-        """
-        if os.path.isfile(response_file):
-            with open(response_file) as f:
-                responses = cPickle.load(f)
-        else:
-            responses = self.extract_conv_response(imgs, 0.1)
-            with open(response_file, 'w') as f:
-                cPickle.dump(responses, f)
-        ranks = self._rank_selection(responses, speedup_ratio)
-        with open("./log/result_1000.txt", 'w') as f:
-            for name in ranks:
-                print("{}:{}".format(name, ranks[name]), file=f)
-
     @timeit
-    def _rank_selection(self, responses, speedup_ratio):
+    def rank_selection(self, eigenvals, speedup_ratio):
         """
         Select the rank for each conv layer
         @Parameters:
-            responses: dict, {blob_name: response(ndarray, (num_filters * (num*H'*W')))}
+            eigenvals: dict, {layer_name: [eigenvals list]}
             speedup_ratio: float, The speed-up ratio for the whole model;
         @Returns:
-            ranks: dict, {layer_name: (old_rank, selected_rank)}
+            ranks: dict, {layer_name: (old_rank, selected_rank, eigenval_ratio)}
         """
-        # Compute the eigenvals for each response
-        eigenvals = self._blob_eigenvale(responses)
         # {layer_name: eiginevals of the layer response}
         eigenvals = {l.name: eigenvals[l.top[0]] for l in self._conv_layer_params}
         # eigen ratio:
@@ -104,37 +77,8 @@ class RankSelection:
                      eigenval_ratio[l]) for l in eigenvals}
         return ranks
 
-    def extract_conv_response(self, imgs, sample_ratio):
-        """ Extract the reponse of the conv layer for the imgs list
-        @Parameters:
-            imgs: list[ndarray], list of image data
-            sample_ratio: ratio used to sample column in the responses
-        @Returns:
-            reponses: dict, {blob_name:[ responses for each image with
-            shape(C,num_imgs*H'*W'*sample_ratio) ]}
-        """
-        conv_layer_names = [l.name for l in self._conv_layer_params]
-        # Split the image into batches
-        batch_size = self._net.blobs[self._net.inputs[0]].num
-        img_batch = [imgs[i: i + batch_size] for i in xrange(0, len(imgs),
-                                                             batch_size)]
-        # concatenate responses of mulitple images;
-        concat_resp = None
-        for ind, batch in enumerate(img_batch):
-            print("Extract responses fro %d-%d image..." % (ind * batch_size + 1,
-                                                            (ind + 1) * batch_size))
-            # responses: {name: (c, batch_num * H' * W' * sample_ratio) ndarray}
-            responses = self._extract_response(batch, conv_layer_names, sample_ratio)
-            if concat_resp is None:
-                concat_resp = responses
-            else:
-                # Concatenate
-                for name in responses:
-                    concat_resp[name] = np.concatenate((concat_resp[name],
-                                                        responses[name]), axis=1)
-        return concat_resp
-
-    def _blob_eigenvale(self, responses):
+    @timeit
+    def blob_eigenvale(self, responses):
         """ Compute the eigenvalue of the response in each blob
         @Parameters:
             responses: dict, {blob_name(str), response(ndarray)}
@@ -153,59 +97,44 @@ class RankSelection:
             eigenvals[blob] = evals
         return eigenvals
 
-    @timeit
-    def _extract_response(self, img_batch, layers_name, sample_ratio=0.1,
-                          batch_size=10,):
-        """ Extract the linear response in certain blobs in the net
-        @Parameters:
-            img_batch: list, the image list, with len == net.batch_size
-            sample_ratio: sample `ratio` column from the response with shape
-                          (C, num_batch*H'*W')
-            layer_name: list, the name of the layer to the extract;
-        @Returns:
-            reponses: dict, {blob_name:[ responses for each image with
-            shape(C,num_batch*H'*W') ]}
-        """
-        responses = {}
-        io_param = self._io_param
-        data = transform_image(img_batch[0], io_param.over_sample,
-                               io_param.mean, io_param.image_dim,
-                               io_param.crop_dim)
-        for img in img_batch[1::]:
-            data = np.vstack((data, transform_image(img, io_param.over_sample,
-                                                    io_param.mean, io_param.image_dim,
-                                                    io_param.crop_dim)))
-        # Do the padding
-        if len(img_batch) < batch_size:
-            for i in xrange(0, batch_size - len(img_batch)):
-                data = np.vstack((data, transform_image(img_batch[0], io_param.over_sample,
-                                                        io_param.mean, io_param.image_dim,
-                                                        io_param.crop_dim)))
-
-        for ind, name in enumerate(layers_name):
-            start = layers_name[ind - 1] if ind > 0 else None
-            out = self._net.forward(**{self._net.inputs[0]: data, 'start': start,
-                                       'end': name})
-            # resp with shape(batch_num, c, H',W')
-            resp = out[name][0:len(img_batch)]
-            # swap axis into (c, batch_num, H',W')
-            resp = resp.swapaxes(0, 1)
-            column_idx = [i for i in xrange(0, resp.size / resp.shape[0])]
-            # Reshape into (c, batch_num * H' * W')
-            resp = resp.reshape(resp.shape[0], len(column_idx))
-            # Random select `sample_ratio` num columns from `resp`
-            random.shuffle(column_idx)
-            column_idx.sort()
-            responses[name] = resp[:, column_idx[0:int(len(column_idx) * sample_ratio)]]
-            # responses[name] = resp
-        return responses
-
 
 if __name__ == "__main__":
-    net, net_param = load_net_and_param("../../models/vgg16/VGG_ILSVRC_16_layers_deploy.prototxt",
-                                        "../../models/vgg16/VGG_ILSVRC_16_layers.caffemodel")
-    rs = RankSelection(net, net_param)
-    with open('./data/1000_1_per_class.txt') as f:
+    # Load the net and net_param
+    net, net_param = load_net_and_param(
+            "../../models/vgg16/VGG_ILSVRC_16_layers_deploy_upgrade.prototxt",
+            "../../models/vgg16/VGG_ILSVRC_16_layers.caffemodel")
+    rank_sel = RankSelection(net, net_param)
+    response_extractor = ConvLayerResponseExtractor(net, net_param)
+
+    # Read the image
+    with open('./data/input/3000_3_per_class.txt') as f:
         img_names = [line.strip() for line in f.readlines()]
     imgs = [load_image(img) for img in img_names]
-    rs.rank_selection(imgs, 2.0, "./data/response/VGG16_1000Image_response.pl")
+
+    # Calculate the responses
+    responses = response_extractor.extract_conv_response(imgs, 0.1)
+    # Compute the eigenvals for each response
+    eigenvals = rank_sel.blob_eigenvale(responses)
+
+    from collections import defaultdict
+    import cPickle
+    # {blob_names: {speedup-ratio: [non-3d-decomp-rank, 3d-decomp-rank]}
+    batch_ranks = defaultdict(lambda: defaultdict(list))
+    speedup_ratio = [2.0, 3.0, 4.0, 8.0]
+    for ratio in speedup_ratio:
+        print("Rank-selction for ratio:{}".format(ratio))
+        rank = rank_sel.rank_selection(eigenvals, ratio)
+        rank2 = rank_sel.rank_selection(eigenvals, ratio**0.5)
+        for blob_name in rank:
+            batch_ranks[blob_name][ratio].append(rank[blob_name][1])
+            batch_ranks[blob_name][ratio].append(rank2[blob_name][1])
+
+    with open("./data/rank_selection/rank-sel-3000_VGG16_2-4.pl", 'w') as f:
+        cPickle.dump(dict(batch_ranks), f)
+
+    with open("./data/rank_selection/rank-sel-3000_VGG16_2-4.txt", "w") as f:
+        for blob_name in batch_ranks:
+            print(blob_name, file=f)
+            for ratio in batch_ranks[blob_name]:
+                print("\t{}:{}".format(ratio, batch_ranks[blob_name][ratio]),
+                      file=f)
