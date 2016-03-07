@@ -3,6 +3,7 @@ import cPickle
 from caffe.proto import caffe_pb2
 from google.protobuf import text_format
 from caffe_io import load_net_param
+from common_util import compute_d__
 
 
 class NetReconstructor:
@@ -19,7 +20,7 @@ class NetReconstructor:
         @Parameter:
             new_proto_filename: string, filename for the new net_param to write into
         """
-        self._rank = self._load_rank(rank_file)
+        self._load_rank(rank_file)
         self._net_reconstruct()
         with open(new_proto_filename, 'w') as f:
             print(str(self._new_net_param), file=f)
@@ -37,39 +38,47 @@ class NetReconstructor:
 
         first_conv_name = [l.name for l in self._net_param.layer 
                            if l.type == 'Convolution'][0]
+        last_layer_is_split = False
         for ind, layer_param in enumerate(self._net_param.layer):
             # We do not acclearate the first convolution layer
             if (layer_param.type == 'Convolution' and 
                 layer_param.name != first_conv_name):
                 self.decomp_conv(layer_param)
+                last_layer_is_split = True
             # If it's not a conv layer, just copy from the original one
             else:
                 new_layer_param = self._new_net_param.layer.add()
                 new_layer_param.CopyFrom(layer_param)
+                if last_layer_is_split:
+                    last_layer_is_split = False
+                    # clear the bottom name in this layer
+                    map(lambda k: new_layer_param.bottom.remove(k), 
+                        [a for a in new_layer_param.bottom])
+                    new_layer_param.bottom.extend(self._new_net_param.layer[-2].top)
 
     def decomp_conv(self, layer_param):
-        def compute_d__(layer_param, k, d_, speedup_ratio):
-            """ Compute d__ with Jaderberg's paper"""
-            d = layer_param.convolution_param.num_output
-            return int((((1 + k**2)/(speedup_ratio**0.5)) - 1) * d * d_ /
-                       (k * (d + d_)))
-
         # Get the filter paramters
         if len(layer_param.convolution_param.kernel_size):
             k = layer_param.convolution_param.kernel_size[0]
         else:
             k = layer_param.convolution_param.kernel_w
         d = layer_param.convolution_param.num_output
+        try:
+            pad = layer_param.convolution_param.pad[0]
+        except IndexError:
+            pad = 0
 
         if self._decomp3d:
             d_ = self._ranks[layer_param.name][self._speedup_ratio][1]
-            d__ = compute_d__(layer_param, k, d_, self._speedup_ratio)
-            new_conv_parm = [(d__, (k, 1)), (d_, (1, k)), (d, (1, 1))]
+            d__ = compute_d__(layer_param.convolution_param.num_output, k, d_,
+                              self._speedup_ratio)
+            new_conv_parm = [(d__, (k, 1), (pad, 0)), (d_, (1, k), (0, pad)),
+                             (d, (1, 1),(0, 0))]
             self._decomp_conv(layer_param, new_conv_parm, 3)
             print("Decompose {} into {}".format(layer_param.name, new_conv_parm))
         else:
             d_ = self._ranks[layer_param.name][self._speedup_ratio][0]
-            new_conv_parm = [(d_, (k, k)), (d, (1, 1))]
+            new_conv_parm = [(d_, (k, k)), (d, (1, 1), (0, 0))]
             self._decomp_conv(layer_param, new_conv_parm, 2)
             print("Decompose {} into {}".format(layer_param.name, new_conv_parm))
         
@@ -92,8 +101,7 @@ class NetReconstructor:
             l.CopyFrom(layer_param)
         new_blobs = ([[name for name in layer_param.bottom]] +
                      [["{}_split{}".format(layer_param.name, i)] 
-                      for i in xrange(1, decomp_num)]
-                     + [[name for name in layer_param.top]])
+                      for i in xrange(1, decomp_num + 1)])
 
         for ind, l in enumerate(conv_layers):
             l.name = "{}_split{}".format(l.name, ind + 1)
@@ -106,9 +114,13 @@ class NetReconstructor:
             # Clear the old kernel_size
             map(lambda k: l.convolution_param.kernel_size.remove(k),
                 [a for a in l.convolution_param.kernel_size])
-            l.convolution_param.kernel_w = 0
-            l.convolution_param.kernel_h = 0
             l.convolution_param.kernel_size.extend(new_conv_parm[ind][1])
+            # pad
+            if len(new_conv_parm[ind]) == 3:
+                map(lambda k: l.convolution_param.pad.remove(k),
+                    [a for a in l.convolution_param.pad])
+                l.convolution_param.pad.extend(new_conv_parm[ind][2])
+
 
     def _load_rank(self, rank_file):
         """ Load the rank_file """
@@ -127,7 +139,7 @@ if __name__ == "__main__":
     net_param = load_net_param(
             "../../models/vgg16/VGG_ILSVRC_16_layers_deploy_upgrade.prototxt")
     speedup_ratio = [2.0, 3.0, 4.0]
-    ranks_file = "./data/rank_selection/rank-sel-3000_VGG16_2-4.pl"
+    ranks_file = "./data/rank_selection/rank-sel-1000_VGG16_2-8.pl"
     proto_file_format = "./data/new_proto_file/vgg16_{}x_{}_deploy.{}"
     for ratio in speedup_ratio:
         reconstror3d = NetReconstructor(ratio, None, net_param)

@@ -3,7 +3,6 @@ import caffe
 import cv2
 from caffe.proto import caffe_pb2
 from google.protobuf import text_format
-from common_util import timeit
 
 
 class IOParam:
@@ -26,7 +25,6 @@ class IOParam:
         self.batch_size = 10
 
 
-@timeit
 def load_net_and_param(net_proto, caffe_model):
     """ Load the `caffe_model` defined in `net_proto`
     @Parameters:
@@ -40,6 +38,10 @@ def load_net_and_param(net_proto, caffe_model):
     net_param = load_net_param(net_proto)
     return net, net_param
 
+def construct_net_from_param(net_proto):
+    net = caffe.Net(net_proto, caffe.TEST)
+    net_param = load_net_param(net_proto)
+    return net, net_param
 
 def load_net_param(net_proto):
     """ Construct a NetParameter based on the `net_proto` file """
@@ -91,8 +93,8 @@ def transform_image(img, over_sample=False, mean_pix=[103.939, 116.779, 123.68],
     # crop
     indices_y = [0, img.shape[0] - crop_dim]
     indices_x = [0, img.shape[1] - crop_dim]
-    center_y = np.floor(indices_y[1] / 2)
-    center_x = np.floor(indices_x[1] / 2)
+    center_y = int(np.floor(indices_y[1] / 2))
+    center_x = int(np.floor(indices_x[1] / 2))
 
     imgs[0] = img[center_y:center_y + crop_dim, center_x:center_x + crop_dim, :]
     if over_sample:
@@ -108,5 +110,5 @@ def transform_image(img, over_sample=False, mean_pix=[103.939, 116.779, 123.68],
     for c in range(3):
         imgs[:, :, :, c] = imgs[:, :, :, c] - mean_pix[c]
     # reorder axis, change shape (num, height, width, channel) to
-    # (channel, height, width)
+    # (num, channel, height, width)
     return np.rollaxis(imgs, 3, 1)
