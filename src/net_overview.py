@@ -2,10 +2,12 @@
 #     layers data overview: name, shape of blob_data, average, max, min
 #     blobs data overview : name, shape of blob_data, average, max, min
 from __future__ import print_function
+import time
 import argparse
 import numpy as np
 from caffe_io import load_net_and_param, load_image, transform_image
 from extrac_conv_layer_response import _extract_response
+from common_util import compute_net_complexity
 
 
 def parse_args():
@@ -41,24 +43,36 @@ def overview_blobs_param(net, net_param, f):
         print("========== blob response:{} ==========".format(blob_name), file=f)
         blob_overview(net.blobs[blob_name].data, blob_name, f)
 
+def time_forward(net, input_imgbatch, i):
+    """ Return the time of foward for a batch """
+    ts = time.time()
+    print("Forwarding the %d batch..." %(i+1))
+    data = input_imgbatch[0]
+    for img in input_imgbatch[1::]:
+        data = np.vstack((data, img))
+    net.forward(**{net.inputs[0]: data})
+    te = time.time()
+    return te - ts
 
 if __name__ == "__main__":
     model_f, weights_f, img_list_f, result_file, batch_num = parse_args()
     # Load the imgs
     print("Loading images...")
     with open(img_list_f, 'r') as f:
-        img_list = [line.strip() for line in f.readlines()[0: batch_num]]
+        img_list = [line.strip() for line in f.readlines()]
         imgs = [transform_image(load_image(name)) for name in img_list]
 
     # Forward a batch to the net
     net, net_param = load_net_and_param(model_f, weights_f)
     imgs_batch = [imgs[i: i+batch_num]for i in xrange(0, len(imgs), batch_num)]
-    data = imgs_batch[0][0]
-    for img in imgs_batch[0][1::]:
-        data = np.vstack((data, img))
-    net.forward(**{net.inputs[0]: data})
+    forward_times = [time_forward(net, imgs_batch[i], i) for i in xrange(0, 10)]
 
     with open(result_file, 'w') as f:
         print("Overview of NET:{}".format(net_param.name), file=f)
+        net_complexity = compute_net_complexity(net, net_param)
+        whole_complexity = sum(net_complexity.itervalues())
+        print("Theory complexity:%d" %(whole_complexity), file=f)
+        print("Average time for 10 batch:%.3f" 
+              %(sum(forward_times) / len(forward_times)), file=f)
         overview_layers_param(net, net_param, f)
         overview_blobs_param(net, net_param, f)

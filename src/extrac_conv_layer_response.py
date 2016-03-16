@@ -83,8 +83,12 @@ def _extract_response(net, net_param, io_param, img_batch, layers_name,
 
     for ind, name in enumerate(layers_name):
         start = layers_name[ind - 1] if ind > 0 else None
-        out = net.forward(**{net.inputs[0]: data, 'start': start,
-                                   'end': name})
+        try:
+            out = net.forward(**{net.inputs[0]: data, 'start': start,
+                                       'end': name})
+        except KeyError as e:
+            top_dict = {l.name: l.top[0] for l in net_param.layer}
+            out = {name: net.blobs[top_dict[name]].data}
         # resp with shape(batch_num, c, H',W')
         resp = out[name][0:len(img_batch)]
         # swap axis into (c, batch_num, H',W')

@@ -87,12 +87,16 @@ def compute_net_complexity(net, net_param):
             net_complexity[name] = input_size * num_output
         elif layer.type == "Convolution":
             d = layer.convolution_param.num_output
-            k = layer.convolution_param.kernel_size[0]
+            k1 = layer.convolution_param.kernel_size[0]
+            try:
+                k2 = layer.convolution_param.kernel_size[1]
+            except:
+                k2 = k1
             top_blobs_name = layer.top[0]
             bottom_blobs_name = layer.bottom[0]
             output_size = net.blobs[top_blobs_name].data.size
             c = net.blobs[bottom_blobs_name].data.shape[1]
-            net_complexity[name] = output_size * k * k * c
+            net_complexity[name] = output_size * k1 * k2 * c
         elif layer.type == "Pooling":
             top_blobs_name = layer.top[0]
             output_size = net.blobs[top_blobs_name].data.size
@@ -103,63 +107,50 @@ def compute_net_complexity(net, net_param):
     return net_complexity
 
 
-
-
-def matrix_factorization(M, feat_num, lr=0.0001, max_iter=1000, err_tol=0.001,
-                         verbose=True):
+def tensor_decompose(name, W, K):
     """
-    Factorize the matrixm `M(n, b)` into two matrix U(n, feat_num),V(feat_num, b)
-    @Parameters:
-        M: numpy ndarray with shape(n, b)
-        feat_num: int, the feature number of the two decomposed matrices;
-        lr: float, learning rate
-        max_iter: max_iteraition number;
-        verbose: whetehr print the log infomation
+    We reshape W(C*D1, D2*N) and decompose W = VH, the shape of V, H
+        V: (C*D1, K)
+        H: (K, (D2*N))
+    We conduct SVD on W = UDQ_h, and we got:
+        V = U[:,0:K] * D^(0.5)
+        H = D^(0.5) * Q_h
+    After that, we reshape V (K,C, D1, 1), K(N, K, 1, D2)
+    @Paramters:
+        W:  ndarray with shape(N, C, D1, D2)
+        K:  int
     @Returns:
-        U, V
+        H, V
     """
-    n, b = M.shape
-    last_loss = None
-    # record the continuous number of loss rise
-    loss_rise_num = 0
-    # Random inilizate this two matrix into range (-0.5, 0.5)
-    U = np.random.rand(n, feat_num) - 0.5
-    V = np.random.rand(feat_num, b) - 0.5
-    print("Split M({}) into U({}), V({})".format(M.shape, U.shape, V.shape))
+    ts = time.time()
+    N, C, D1, D2 = W.shape
+    # K = min(C*D1, D2*N)
+    # W = np.rollaxis(W, 0, 3).reshape(C*D1, D2*N)
+    W = np.swapaxes(W, 0, 1).swapaxes(1, 2).swapaxes(2, 3).reshape(C*D1, D2*N)
+    U, D, Q_h = np.linalg.svd(W, full_matrices=False)
+    D_sqrt = np.diag(D[0:K])**0.5
+    V = U[:,0:K].dot(D_sqrt)
+    H = D_sqrt.dot(Q_h[0:K,:])
 
-    for iter_ in xrange( max_iter):
-        lr_ = lr / min(((iter_+1) / 100 + 1), 10)
-        lr_ = lr
-        for i in xrange(n):
-            for j in xrange(b):
-                eij = M[i][j] - np.dot(U[i,:], V[:,j])
-                # for k in xrange(feat_num):
-                U[i,:] += lr_ * (2 * eij * V[:, j])
-                V[:,j] += lr_ * (2 * eij * U[i, :])
-        # Calculate the err loss
-        E = M - np.dot(U, V)
-        loss = (E * E).sum() / E.size
-        if last_loss is not None and loss > last_loss:
-            loss_rise_num += 1
-        else:
-            loss_rise_num = 0
-        last_loss = loss
-        if verbose:
-            print("Loss:{} in iter {}, loss_rise_num:{}".format(loss, iter_,
-                                                                loss_rise_num))
-        # if loss rise continuously 5 times, stop it;
-        if loss < err_tol or loss_rise_num > 5:
-            break
-    return U, V
+    Err = W - V.dot(H)
+    loss = np.linalg.norm(Err)
+    V = V.reshape(C, D1, 1, K)
+    H = H.reshape(K, 1, D2, N)
+    V = np.rollaxis(V, 3, 0)
+    H = np.rollaxis(H, 3, 0)
+    te = time.time()
+    print("Decompose {} cost {:.3f}, with loss:{}".format(name, te-ts, loss))
+    return H, V
 
 
-def construct_one_layer_tmp_net(o_layer_param, input_shape, W, b, 
+def construct_one_layer_tmp_net(convolution_param, input_shape, W, b, 
                                 tmp_layer_name='tmp_conv',
                                 tmp_proto_file='tmp_net.prototxt'):
     """
-    Construct a tmp net with a convolution layer
+    Construct a tmp net with a convolution layer, which convolution_param is 
+    specified by parameter `convolution_param`
     @Parameters:
-        o_layer_param: the old layer parameters:
+        convolution_param: The convolution param of the tmp conv layer
         input_shape: The input shape of the tmp net
         W: the weights of the filters in the tmp_layer
         b: the bias of the filters in the tmp_layer
@@ -179,8 +170,7 @@ def construct_one_layer_tmp_net(o_layer_param, input_shape, W, b,
     l_param.name= tmp_layer_name
     l_param.bottom.append('data')
     l_param.top.append(tmp_layer_name)
-    l_param.convolution_param.CopyFrom(o_layer_param.convolution_param)
-    l_param.convolution_param.kernel_size.insert(0, 1)
+    l_param.convolution_param.CopyFrom(convolution_param)
     # save it to file
     with open(tmp_proto_file, 'w') as f:
         f.write(str(tmp_net_param))
@@ -192,6 +182,7 @@ def construct_one_layer_tmp_net(o_layer_param, input_shape, W, b,
     net.layers[0].blobs[0].data[...] = W
     net.layers[0].blobs[1].data[...] = b
     return net, net_param
+
 
 def gsvd(A, Rk, Rl):
     """
@@ -229,3 +220,79 @@ def gsvd(A, Rk, Rl):
     Err = A - A_approximate
     print("Loss of gsvd:{:.3f}".format(np.linalg.norm(Err)))
     return U, D_, Vh
+
+def compute_output_shape(input_shape, pad, stride, kernel_shape):
+    output_shape = []
+    for i in xrange(len(input_shape)):
+        input_dim = input_shape[i]
+        output_dim = (input_dim + 2 * pad[i] - kernel_shape[i]) / stride[i] + 1
+        output_shape.append(output_dim)
+    return tuple(output_shape)
+        
+
+def img2col(X, pad, stride, kernel_shape, bias):
+    """
+    Convert the input X(C, H, W) into ((CK^2), H'W')
+    """
+    H_, W_, = compute_output_shape(X.shape[1::], pad, stride, kernel_shape)
+    pad_h, pad_w = pad
+    stride_h, stride_w = stride
+    kernel_h, kernel_w = kernel_shape
+    C, H, W = X.shape
+    X_ = np.zeros((C, H+pad_h*2, W+pad_w*2))
+    end_h = -pad_h if pad_h != 0 else X.shape[1]
+    end_w = -pad_w if pad_w != 0 else X.shape[2]
+    X_[:, pad_h: end_h, pad_w: end_w] = X
+    resultX = []
+    for i in xrange(H_):
+        start_h = i * stride_h
+        end_h = start_h + kernel_h
+        for j in xrange(W_):
+            start_w = j * stride_w
+            end_w = start_w + kernel_w
+            tmp_result = X_[:, start_h:end_h, start_w:end_w].flatten()
+            if bias is None:
+                resultX.append(tmp_result)
+            else:
+                resultX.append(np.append(tmp_result, 1.0))
+    resultX = np.array(resultX).transpose()
+    return resultX
+   
+
+@timeit
+def conduct_convolution(W, b, X, pad=(0,0), stride=(1,1)):
+    """
+    Conduction The convolution operation on input X
+    Y_n = (D ,(CK^2)) * ((CK^2), H'W') = (D, H'W') = (D, H', W')
+    @Parameters:
+        W: ndarray with shape(D, C, K, K), the filter sets of the convolution
+        b: ndarray with shape(1, D)
+        X: ndarray with shape(N, C, H, W), the input data
+
+    """
+    kernel_shape = W.shape[2::]
+    # Reshape W into shape(D, CK^2)
+    W = W.reshape(W.shape[0], W.size / W.shape[0])
+    # Reshape W into shape(D, CK^2+1)
+    if b is not None:
+        W = np.concatenate((W, b.reshape(b.size, 1)), axis=1)
+    H_, W_ = compute_output_shape(X.shape[2::], pad, stride, kernel_shape)
+    Y = []
+    for n in xrange(X.shape[0]):
+        # X_ with shape(ck^2+1, H'W')
+        Xn = img2col(X[n], pad, stride, kernel_shape, b)
+
+        # Yn with shape(D, H'W')
+        Yn = W.dot(Xn)
+        Yn = Yn.reshape(Yn.shape[0], H_, W_)
+        Y.append(Yn)
+    return np.array(Y)
+
+
+if __name__ == "__main__":
+    W = np.random.rand(64, 64, 3, 3) - 0.5
+    b = np.random.rand(1,64)
+    X = np.random.rand(10, 64, 128, 128)
+    # X_ = img2col(X, (1, 1), stride=(1,1), kernel_shape=(3,3))
+    Y = conduct_convolution(W, b, X, pad=(0,0), stride=(1,1))
+    print Y.shape
