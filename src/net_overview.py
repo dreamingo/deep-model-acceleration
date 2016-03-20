@@ -7,7 +7,7 @@ import argparse
 import numpy as np
 from caffe_io import load_net_and_param, load_image, transform_image
 from extrac_conv_layer_response import _extract_response
-from common_util import compute_net_complexity
+from common_util import compute_net_complexity, compute_net_storage 
 
 
 def parse_args():
@@ -70,8 +70,10 @@ if __name__ == "__main__":
     with open(result_file, 'w') as f:
         print("Overview of NET:{}".format(net_param.name), file=f)
         net_complexity = compute_net_complexity(net, net_param)
+        space_complexity = compute_net_storage(net, net_param)
         whole_complexity = sum(net_complexity.itervalues())
         print("Theory complexity:%d" %(whole_complexity), file=f)
+        print("Space complexity:%d" %(sum(space_complexity.itervalues())), file=f)
         print("Average time for 10 batch:%.3f" 
               %(sum(forward_times) / len(forward_times)), file=f)
         overview_layers_param(net, net_param, f)

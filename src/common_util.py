@@ -62,6 +62,20 @@ def get_filters_params(net, net_param):
     return filter_params
 
 
+def compute_net_storage(net, net_param):
+    """ Compute the net space complexity, for covolution layer:
+            complexity: DCK1K2
+        For full-connected layer:
+            complexity: dC
+    """
+    space_complexity = {}
+    for name in net.params:
+        W = net.params[name][0].data
+        b = net.params[name][1].data
+        space_complexity[name] = W.size + b.size
+    return space_complexity
+
+
 def compute_net_complexity(net, net_param):
     """ 
     Compute the net compute complexity, for convolution layer:
@@ -71,11 +85,8 @@ def compute_net_complexity(net, net_param):
             H'W' the height and width of the top blobs
     for full-connected layer:
         commlexity = input_blobs.size() * num_output
-    @Parameters:
-        layer_name: the name of the conv layer to be computed;
-        filter_params
     @Retunrs:
-        complexity, int
+        net_complexity, dict, {layer_name: complexity}
     """
     net_complexity = {}
     for i, layer in enumerate(net_param.layer):
